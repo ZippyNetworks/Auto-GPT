@@ -59,17 +59,40 @@ class ApiManager(metaclass=Singleton):
                 max_tokens=max_tokens,
                 api_key=cfg.openai_api_key,
             )
-        if not hasattr(response, "error"):
-            logger.debug(f"Response: {response}")
-            prompt_tokens = response.usage.prompt_tokens
-            completion_tokens = response.usage.completion_tokens
-            self.update_cost(prompt_tokens, completion_tokens, model)
-        return response
+        if hasattr(response, "error"):
+            logger.error(f"Error response: {response}")
+            error_message = response.error.message
+            # Handle specific error cases
+            if "Max tokens" in error_message:
+                logger.info("Received token limit error. Attempting to reduce token size.")
+                messages = self.reduce_token_size(messages)
+                if messages:
+                    return self.create_chat_completion(messages, model, temperature, max_tokens, deployment_id)
+            raise Exception(f"OpenAI API error: {error_message}")
+        
+        logger.debug(f"Response: {response}")
+        prompt_tokens = response.usage.prompt_tokens
+        completion_tokens = response.usage.completion_tokens
+        self.update_cost(prompt_tokens, completion_tokens, model)
+        return response.choices[0].message['content']
+
+    def reduce_token_size(self, messages):
+        """
+        Reduce the token size of messages by removing the last message.
+        Args:
+        messages (list): The list of messages.
+        Returns:
+        list: The updated list of messages with reduced token size.
+        """
+        if len(messages) <= 1:
+            return []
+        reduced_messages = messages[:-1]
+        logger.info(f"Reducing token size. New message count: {len(reduced_messages)}")
+        return reduced_messages
 
     def update_cost(self, prompt_tokens, completion_tokens, model):
         """
         Update the total cost, prompt tokens, and completion tokens.
-
         Args:
         prompt_tokens (int): The number of tokens used in the prompt.
         completion_tokens (int): The number of tokens used in the completion.
@@ -86,7 +109,6 @@ class ApiManager(metaclass=Singleton):
     def set_total_budget(self, total_budget):
         """
         Sets the total user-defined budget for API calls.
-
         Args:
         total_budget (float): The total budget for API calls.
         """
@@ -95,7 +117,6 @@ class ApiManager(metaclass=Singleton):
     def get_total_prompt_tokens(self):
         """
         Get the total number of prompt tokens.
-
         Returns:
         int: The total number of prompt tokens.
         """
@@ -104,7 +125,6 @@ class ApiManager(metaclass=Singleton):
     def get_total_completion_tokens(self):
         """
         Get the total number of completion tokens.
-
         Returns:
         int: The total number of completion tokens.
         """
@@ -113,7 +133,6 @@ class ApiManager(metaclass=Singleton):
     def get_total_cost(self):
         """
         Get the total cost of API calls.
-
         Returns:
         float: The total cost of API calls.
         """
@@ -122,7 +141,6 @@ class ApiManager(metaclass=Singleton):
     def get_total_budget(self):
         """
         Get the total user-defined budget for API calls.
-
         Returns:
         float: The total budget for API calls.
         """
