@@ -7,66 +7,15 @@ from autogpt.llm.modelsinfo import COSTS
 from autogpt.logs import logger
 from autogpt.singleton import Singleton
 
-model_token_limit = {
-    "gpt-3.5-turbo": 4096,
-    # Add more models and their respective token limits if needed
-}
-
-
-def handle_token_limit_error(messages, model, max_tokens):
-    """
-    Handles the token limit error by splitting the messages into smaller chunks.
-
-    Args:
-        messages (list): The list of messages.
-        model (str): The model used for the API call.
-        max_tokens (int): The maximum number of tokens for the API call.
-
-    Returns:
-        list: List of responses for each message chunk.
-    """
-    # Calculate the maximum tokens per message based on the model's context length limit
-    max_context_tokens = model_token_limit[model] - len(messages[0]["role"]) - len(messages[0]["content"]) - 1
-    max_tokens_per_message = max_context_tokens + max_tokens - 1
-
-    # Split the messages into smaller chunks
-    message_chunks = []
-    current_chunk = []
-    current_chunk_tokens = 0
-
-    for message in messages:
-        message_tokens = len(message["role"]) + len(message["content"]) + 1
-
-        if current_chunk_tokens + message_tokens <= max_tokens_per_message:
-            current_chunk.append(message)
-            current_chunk_tokens += message_tokens
-        else:
-            message_chunks.append(current_chunk)
-            current_chunk = [message]
-            current_chunk_tokens = message_tokens
-
-    if current_chunk:
-        message_chunks.append(current_chunk)
-
-    # Make API calls for each message chunk
-    responses = []
-    for chunk in message_chunks:
-        response = api_manager.create_chat_completion(chunk, model=model, max_tokens=max_tokens)
-        responses.append(response)
-
-    return responses
-
 
 class ApiManager(metaclass=Singleton):
     def __init__(self):
-        # Initialize total counts and cost
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self.total_cost = 0
-        self.total_budget = 0
+        self.total_budget = 0.0
 
     def reset(self):
-        # Reset total counts and cost
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
         self.total_cost = 0
@@ -78,25 +27,22 @@ class ApiManager(metaclass=Singleton):
         model: str | None = None,
         temperature: float = None,
         max_tokens: int | None = None,
-        deployment_id=None,
+        deployment_id: str | None = None,
     ) -> str:
         """
         Create a chat completion and update the cost.
-
         Args:
             messages (list): The list of messages to send to the API.
             model (str): The model to use for the API call.
             temperature (float): The temperature to use for the API call.
             max_tokens (int): The maximum number of tokens for the API call.
-            deployment_id: The deployment ID for Chat models.
-
+            deployment_id (str): The deployment ID for the API call.
         Returns:
             str: The AI's response.
         """
         cfg = Config()
         if temperature is None:
             temperature = cfg.temperature
-
         if deployment_id is not None:
             response = openai.ChatCompletion.create(
                 deployment_id=deployment_id,
@@ -114,47 +60,22 @@ class ApiManager(metaclass=Singleton):
                 max_tokens=max_tokens,
                 api_key=cfg.openai_api_key,
             )
-
         if hasattr(response, "error"):
-            error_message = response.error.message
-            if "token limit" in error_message.lower():
-                logger.info("Received token limit error. Attempting to handle the error.")
-
-                # Handle the token limit error
-                responses = handle_token_limit_error(messages, model, max_tokens)
-
-                # Combine the responses into a single response
-                combined_response = {
-                    "id": response.id,
-                    "object": response.object,
-                    "created": response.created,
-                    "model": response.model,
-                    "usage": response.usage,
-                    "choices": [],
-                }
-
-                for resp in responses:
-                    combined_response["choices"].extend(resp.choices)
-
-                prompt_tokens = combined_response["usage"]["prompt_tokens"]
-                completion_tokens = combined_response["usage"]["completion_tokens"]
-                self.update_cost(prompt_tokens, completion_tokens, model)
-
-                return combined_response
-
-            logger.error(f"API error: {response.error}")
-
-        logger.debug(f"Response: {response}")
-        prompt_tokens = response.usage.prompt_tokens
-        completion_tokens = response.usage.completion_tokens
-        self.update_cost(prompt_tokens, completion_tokens, model)
-
-        return response
+            if "This model's maximum context length" in response.error.message:
+                self.handle_token_limit_error(response.error, messages, model)
+            else:
+                logger.error(f"API Error: {response.error}")
+                return ""
+        else:
+            logger.debug(f"Response: {response}")
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            self.update_cost(prompt_tokens, completion_tokens, model)
+        return response.choices[0].message["content"]
 
     def update_cost(self, prompt_tokens, completion_tokens, model):
         """
         Update the total cost, prompt tokens, and completion tokens.
-
         Args:
             prompt_tokens (int): The number of tokens used in the prompt.
             completion_tokens (int): The number of tokens used in the completion.
@@ -171,16 +92,30 @@ class ApiManager(metaclass=Singleton):
     def set_total_budget(self, total_budget):
         """
         Sets the total user-defined budget for API calls.
-
         Args:
             total_budget (float): The total budget for API calls.
         """
         self.total_budget = total_budget
 
+    def get_total_budget(self):
+        """
+        Get the total user-defined budget for API calls.
+        Returns:
+            float: The total budget for API calls.
+        """
+        return self.total_budget
+
+    def get_total_cost(self):
+        """
+        Get the total cost of API calls.
+        Returns:
+            float: The total cost of API calls.
+        """
+        return self.total_cost
+
     def get_total_prompt_tokens(self):
         """
         Get the total number of prompt tokens.
-
         Returns:
             int: The total number of prompt tokens.
         """
@@ -189,26 +124,44 @@ class ApiManager(metaclass=Singleton):
     def get_total_completion_tokens(self):
         """
         Get the total number of completion tokens.
-
         Returns:
             int: The total number of completion tokens.
         """
         return self.total_completion_tokens
 
-    def get_total_cost(self):
+    def handle_token_limit_error(self, error, messages, model):
         """
-        Get the total cost of API calls.
-
-        Returns:
-            float: The total cost of API calls.
+        Handle the error when the token limit is reached for a model.
+        Args:
+            error (openai.error.InvalidRequestError): The error response from the API.
+            messages (list): The list of messages sent to the API.
+            model (str): The model used for the API call.
         """
-        return self.total_cost
-
-    def get_total_budget(self):
-        """
-        Get the total user-defined budget for API calls.
-
-        Returns:
-            float: The total budget for API calls.
-        """
-        return self.total_budget
+        cfg = Config()
+        logger.warning(f"Token limit error: {error}")
+        logger.warning("Attempting to truncate the conversation and retry...")
+        num_tokens_to_remove = (
+            self.total_prompt_tokens + self.total_completion_tokens - model.max_token_limit
+        )
+        if num_tokens_to_remove <= 0:
+            logger.error("Token limit exceeded. Cannot truncate further.")
+            return
+        for i in range(len(messages) - 1, -1, -1):
+            message = messages[i]
+            if len(message["content"].split()) <= num_tokens_to_remove:
+                num_tokens_to_remove -= len(message["content"].split())
+                messages.pop(i)
+            else:
+                split_content = message["content"].split()
+                num_tokens_to_remove = 0
+                split_content = split_content[: len(split_content) - num_tokens_to_remove]
+                message["content"] = " ".join(split_content)
+                break
+        logger.warning(f"Truncated conversation: {messages}")
+        self.create_chat_completion(
+            messages=messages,
+            model=model,
+            temperature=cfg.temperature,
+            max_tokens=cfg.max_tokens,
+            deployment_id=model.deployment_id,
+        )
